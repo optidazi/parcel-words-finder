@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Camera as CameraIcon, Image, RotateCcw, MapPin } from 'lucide-react';
 import { toast } from 'sonner';
+import { supabase } from '@/integrations/supabase/client';
 
 interface ScanResult {
   id: string;
@@ -13,6 +14,7 @@ interface ScanResult {
   imageUrl: string;
   what3wordsAddress: string;
   confidence: number;
+  supabaseImagePath?: string;
 }
 
 const ScannerInterface = () => {
@@ -40,6 +42,42 @@ const ScannerInterface = () => {
     return { address: randomAddress, confidence };
   };
 
+  const uploadImageToSupabase = async (dataUrl: string): Promise<string | null> => {
+    try {
+      // Convert data URL to blob
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      
+      // Generate unique filename
+      const fileName = `parcel_${Date.now()}.jpg`;
+      
+      // Upload to Supabase Storage
+      const { data, error } = await supabase.storage
+        .from('parcel-images')
+        .upload(fileName, blob, {
+          contentType: 'image/jpeg',
+          upsert: false
+        });
+
+      if (error) {
+        console.error('Upload error:', error);
+        toast.error('Failed to save image to storage');
+        return null;
+      }
+
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('parcel-images')
+        .getPublicUrl(fileName);
+
+      return publicUrl;
+    } catch (error) {
+      console.error('Upload error:', error);
+      toast.error('Failed to process image upload');
+      return null;
+    }
+  };
+
   const handleCapture = async () => {
     try {
       const image = await Camera.getPhoto({
@@ -53,23 +91,29 @@ const ScannerInterface = () => {
         setCapturedImage(image.dataUrl);
         setIsScanning(true);
         
-        toast.info('Scanning image for what3words address...');
+        toast.info('Scanning image and saving to storage...');
 
         try {
-          const result = await mockOCRScan(image.dataUrl);
+          // Upload image to Supabase in parallel with OCR scanning
+          const [ocrResult, supabaseUrl] = await Promise.all([
+            mockOCRScan(image.dataUrl),
+            uploadImageToSupabase(image.dataUrl)
+          ]);
           
           const newScanResult: ScanResult = {
             id: Date.now().toString(),
             timestamp: new Date(),
-            imageUrl: image.dataUrl,
-            what3wordsAddress: result.address,
-            confidence: result.confidence
+            imageUrl: supabaseUrl || image.dataUrl, // Fallback to local if upload fails
+            what3wordsAddress: ocrResult.address,
+            confidence: ocrResult.confidence,
+            supabaseImagePath: supabaseUrl ? supabaseUrl.split('/').pop() : undefined
           };
 
           setCurrentResult(newScanResult);
           setScanResults(prev => [newScanResult, ...prev]);
           
-          toast.success(`Address found: ${result.address} (${result.confidence}% confidence)`);
+          const storageMessage = supabaseUrl ? ' (saved to cloud storage)' : ' (local only)';
+          toast.success(`Address found: ${ocrResult.address} (${ocrResult.confidence}% confidence)${storageMessage}`);
         } catch (error) {
           toast.error('Failed to scan image. Please try again.');
         } finally {
@@ -110,7 +154,7 @@ const ScannerInterface = () => {
                     <div className="absolute inset-0 bg-blue-500/20 flex items-center justify-center">
                       <div className="bg-white p-4 rounded-lg shadow-lg flex items-center gap-3">
                         <div className="animate-spin w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full"></div>
-                        <span className="font-medium">Scanning for what3words address...</span>
+                        <span className="font-medium">Scanning and saving...</span>
                       </div>
                     </div>
                   )}
@@ -173,6 +217,11 @@ const ScannerInterface = () => {
                 </p>
                 <p className="text-sm text-green-700">
                   Scanned at {currentResult.timestamp.toLocaleTimeString()}
+                  {currentResult.supabaseImagePath && (
+                    <span className="ml-2 text-xs bg-green-200 px-2 py-1 rounded">
+                      Saved to cloud
+                    </span>
+                  )}
                 </p>
               </div>
               
@@ -189,9 +238,16 @@ const ScannerInterface = () => {
                         <span className="font-mono text-sm">
                           ///{result.what3wordsAddress}
                         </span>
-                        <Badge variant="outline" className="text-xs">
-                          {result.confidence}%
-                        </Badge>
+                        <div className="flex gap-1">
+                          <Badge variant="outline" className="text-xs">
+                            {result.confidence}%
+                          </Badge>
+                          {result.supabaseImagePath && (
+                            <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800">
+                              Cloud
+                            </Badge>
+                          )}
+                        </div>
                       </div>
                       <p className="text-xs text-gray-500 mt-1">
                         {result.timestamp.toLocaleString()}
